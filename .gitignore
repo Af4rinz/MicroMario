@@ -1,0 +1,7 @@
+Debug
+cmake-build-debug
+.settings
+CMakeLists.txt
+CMakeLists_template.txt
+MicroMario Debug.launch
+.idea
