@@ -24,7 +24,6 @@
 /* USER CODE BEGIN Includes */
 #include <stdlib.h>
 #include <stdio.h>
-#include <string.h>
 #include <math.h>
 #include "LiquidCrystal.h"
 /* USER CODE END Includes */
@@ -48,13 +47,17 @@ byte flagChar[] = {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-// Map size, w/o the end padding
-
+// board led pins
 uint16_t leds[8] = {GPIO_PIN_8, GPIO_PIN_9, GPIO_PIN_10, GPIO_PIN_11,
                     GPIO_PIN_12, GPIO_PIN_13, GPIO_PIN_14, GPIO_PIN_15 };
-
+// lcd pins
 uint16_t lcd[7] = {GPIO_PIN_8, GPIO_PIN_9, GPIO_PIN_10, GPIO_PIN_11,
                    GPIO_PIN_12, GPIO_PIN_13, GPIO_PIN_14};
+
+// Seven Segment Digit pins
+uint16_t ssd[4] = {GPIO_PIN_1, GPIO_PIN_2, GPIO_PIN_3, GPIO_PIN_4};
+// IC 7447 pins
+uint16_t icd[4] = {GPIO_PIN_8, GPIO_PIN_9, GPIO_PIN_10, GPIO_PIN_15};
 //keypad mapping
 char keys[4][4] = {
         {'D', ' ', 'R', 'P'},
@@ -73,11 +76,12 @@ uint32_t outa[4] = {GPIO_PIN_1, GPIO_PIN_2, GPIO_PIN_3, GPIO_PIN_4};
 
 //                            >    █     円   ' '    ﾛ    x̄    flag   mario
 uint8_t cellTypeChar[8] = {0x3E, 0xFF, 0xFC, 0x20, 0xDB, 0xF8, 0x01, 0x00};
-uint8_t charMap[4][80];
 
 enum cellType {BLADE, GROUND, PIPE, AIR, BLOCK, CHEST, FLAG, MARIO};
 enum moveType {HALT, RUN, JUMP, RUMP} marioMode;
 enum moveDir {NONE, RIGHT, UP, DOWN, UPRIGHT, DOWNRIGHT} marioDir;
+
+int idx[4] = {0, 2, 1, 3};
 
 int map[4][80] = {3};
 // copy of the original map,
@@ -90,17 +94,23 @@ int life = 3;
 // the map doesn't move for 3 periods after hit
 int immunity = 0;
 int coins = 0;
+int startTime;
+int endTime;
 
 double volSpeed;
 
 unsigned char uartin[1] = "";
 int buttonCount = 0;
-// debounce handlers
-uint32_t lastUartTick = 0;
+
+// debounce buttons
 uint32_t lastButtonTick = 0;
-uint32_t lastTimerTick = 0;
 int isPlaying = 0;
 int jumpProg = -1;
+
+//progress of 7seg, between 0-4
+// (including dec point)
+int d = 0;
+int val = 0;
 
 /* USER CODE END PD */
 
@@ -149,25 +159,24 @@ void lifeLost(void);
 void gameLost(void);
 void gameWon(void);
 
-void collisionCheck(enum moveDir);
+void moveHandler(enum moveDir);
 enum moveDir getMoveDir(enum moveType move);
-void runMario(void);
 void jump(void);
-void checkKeypad();
 
 void generateMap(void);
 void printMap(void);
 
-void numToBcd(int n, int digit){
+void numToBcd(int n){
   int x[4];
-//  HAL_GPIO_WritePin (GPIOA, outa[digit], 1);
   for (int i=0; i<4; i++){
     x[i] = n & (int) (pow(2, i));
     if (x[i] > 0) x[i] = 1;
-    HAL_GPIO_WritePin(GPIOC, outc[i], x[i]);
+    // write to ic
+    HAL_GPIO_WritePin(GPIOC, icd[i], x[i]);
   }
-//  HAL_GPIO_WritePin (GPIOA, outa[digit], 0);
 }
+
+
 
 /* USER CODE END PFP */
 
@@ -227,7 +236,6 @@ int main(void)
     ////HAL_UART_Transmit(&huart1, data, sizeof(data), 1000);
 
     lastButtonTick = HAL_GetTick();
-    lastUartTick = HAL_GetTick();
 
     // LCD Init
     LiquidCrystal (GPIOB, lcd[0], lcd[1], lcd[2],
@@ -618,7 +626,7 @@ static void MX_TIM4_Init(void)
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 7199;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 2000;
+  htim4.Init.Period = 100;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
@@ -734,10 +742,11 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_2, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4
+                          |GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_15, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13
@@ -771,25 +780,27 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PF2 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+
   /*Configure GPIO pin : PA0 */
   GPIO_InitStruct.Pin = GPIO_PIN_0;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PA1 PA2 PA3 PA4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4;
+  /*Configure GPIO pins : PA1 PA2 PA3 PA4
+                           PA8 PA9 PA10 PA15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4
+                          |GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PF4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PB10 PB11 PB12 PB13
                            PB14 PB8 PB9 */
@@ -839,9 +850,9 @@ static void MX_GPIO_Init(void)
 // (called with initGame, srand given by time called)
 void generateMap() {
     // probabilities for various cell features (/100)
-    //FIXME: probability revert to add pipes/pits/blocks
-    //int prob[4] = {10, 20, 10, 8};
-    int prob[4] = {10, 0, 20, 0};
+    int prob[4] = {10, 20, 10, 8};
+    // TODO: use these for easy mode (no pits/blocks)
+    //int prob[4] = {10, 0, 20, 0};
     for (int i=0; i<4; i++){
         switch (i) {
             // chests or blocks or sky
@@ -849,7 +860,6 @@ void generateMap() {
                 for (int j=0; j<4; j++){
                     map[i][j] = AIR;
                     genmap[i][j] = AIR;
-                    charMap[i][j] = cellTypeChar[AIR];
                 }
                 for (int j=4; j<79; j++){
                     int rs = rand() % 100;
@@ -861,7 +871,6 @@ void generateMap() {
                     else r = AIR;
                     map[i][j] = r;
                     genmap[i][j] = r;
-                    charMap[i][j] = cellTypeChar[r];
                 }
                 break;
             // pipes or not
@@ -870,13 +879,13 @@ void generateMap() {
                     int r;
                     // if there's a block above, don't put pipes
                     if (j <= 6 || map[0][j] == BLOCK
+                            || map[0][j] == CHEST
                          || (rand()%100) > prob[2])
                         r = AIR;
                     else
                         r = PIPE;
                     map[i][j] = r;
                     genmap[i][j] = r;
-                    charMap[i][j] = cellTypeChar[r];
                 }
                 break;
             // ground or pit
@@ -896,7 +905,6 @@ void generateMap() {
                         r = AIR;
                     map[i][j] = r;
                     genmap[i][j] = r;
-                    charMap[i][j] = cellTypeChar[r];
                 }
                 break;
             case 1:
@@ -904,14 +912,12 @@ void generateMap() {
                 for(int j=0; j<79; j++){
                     map[i][j] = AIR;
                     genmap[i][j] = AIR;
-                    charMap[i][j] = cellTypeChar[AIR];
                 }
                 break;
         }
     }
     map[2][59] = FLAG;
     genmap[2][59] = FLAG;
-    charMap[2][59] = cellTypeChar[FLAG];
 
 }
 
@@ -927,15 +933,22 @@ void printMap () {
         gameWon();
         return;
     }
-
+    /* --------------------
+     * i = 0 prints line 0,
+     * i = 1 prints line 2,
+     * i = 2 prints line 1,
+     * i = 3 prints line 3.
+     * ------------------- */
     for (int i = 0; i < 4; i++) {
         //skip the air
-        if (i == 1 && mapOffset != 0 &&
-        (mario[0] != 1 || !isPlaying)) {
+        // if game end graphics is on
+        if (!isPlaying && (i == 2 || i == 3)) {
             continue;
         }
+        if (idx[i] <= 1) {
+            setCursor(0, idx[i]);
+        }
 
-        setCursor(0, i);
         write(cellTypeChar[BLADE]);
 
         // Mario hit the blades
@@ -946,7 +959,7 @@ void printMap () {
         }
 
         for (int j = mapOffset; j < mapOffset + 19; j++) {
-            write(cellTypeChar[map[i][j]]);
+            write(cellTypeChar[map[idx[i]][j]]);
         }
     }
 
@@ -969,20 +982,22 @@ void initGame(){
         HAL_GPIO_WritePin(GPIOE, leds[i], 1);
     }
 
-    // set up Mario
-    mario[0] = 2;
-    mario[1] = 4;
-    map[2][4] = MARIO;
-
+    // generate random map
     srand(HAL_GetTick());
     generateMap();
     command(LCD_CLEARDISPLAY);
 
+    // set up Mario
+    mario[0] = 2;
+    mario[1] = 4;
+    map[2][4] = MARIO;
     printMap();
-    collisionCheck(NONE);
+    moveHandler(NONE);
 
     buttonCount = 1;
     isPlaying = 1;
+    // mark start for score calc
+    startTime = HAL_GetTick();
 
     HAL_TIM_Base_Start_IT(&htim4);
     HAL_UART_Receive_IT(&huart1, uartin, sizeof(uartin));
@@ -1002,6 +1017,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         // generic play/pause
         else if (buttonCount == 1 && isPlaying) {
             isPlaying = 0;
+            // don't count time paused
+            endTime = HAL_GetTick();
             setCursor(5, 1);
             print("P A U S E D");
             unsigned char data[40];
@@ -1009,14 +1026,17 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             HAL_UART_Transmit(&huart1, data, sizestr, 1000);
             HAL_TIM_Base_Stop_IT(&htim2);
             HAL_TIM_Base_Stop_IT(&htim3);
-            HAL_TIM_Base_Stop_IT(&htim4);
         }
         else {
             // clear pause graphics
             setCursor(5, 1);
             print ("           ");
             isPlaying = 1;
-            HAL_TIM_Base_Start_IT(&htim4);
+            // endTime was set at pause
+            // -> the extra duration counted.
+            // we can shift the start time
+            // and concat it to current time.
+            startTime = HAL_GetTick() - (endTime - startTime);
             HAL_TIM_Base_Start_IT(&htim2);
         }
     }
@@ -1025,14 +1045,15 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     else if (currTick - lastButtonTick >= 50) {
         // Run
         if (GPIO_Pin == kcols[0] && isPlaying){
-            //runMario();
             marioMode = (marioMode != JUMP) ? RUN : RUMP;
             marioDir = getMoveDir(marioMode);
-            collisionCheck((marioDir));
+            moveHandler((marioDir));
         }
         // Pause/Stop
         else if (GPIO_Pin == kcols[3] && isPlaying){
             isPlaying = 0;
+            // don't count the time paused
+            endTime = HAL_GetTick();
             setCursor(5, 1);
             print("P A U S E D");
             unsigned char data[40];
@@ -1040,7 +1061,6 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             HAL_UART_Transmit(&huart1, data, sizestr, 1000);
             HAL_TIM_Base_Stop_IT(&htim2);
             HAL_TIM_Base_Stop_IT(&htim3);
-            HAL_TIM_Base_Stop_IT(&htim4);
         }
         // Resume/Start
         else if (GPIO_Pin == kcols[2]){
@@ -1052,7 +1072,11 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
                 setCursor(5, 1);
                 print ("           ");
                 isPlaying = 1;
-                HAL_TIM_Base_Start_IT(&htim4);
+                // endTime was set at pause
+                // -> the extra duration counted.
+                // we can shift the start time
+                // and concat it to current time.
+                startTime = HAL_GetTick() - (endTime - startTime);
                 HAL_TIM_Base_Start_IT(&htim2);
             }
         }
@@ -1061,10 +1085,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             //Activate jump sequence
             HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_0);
             jumpProg = 0;
-            //marioMode = (marioMode==RUN)? RUMP : JUMP;
             marioMode = JUMP;
             HAL_TIM_Base_Start_IT(&htim3);
-
         }
     }
     lastButtonTick = currTick;
@@ -1074,20 +1096,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
     {
-        // Walk
+        // Run
         if((uartin[0] == 'd' || uartin[0] == 'D') && isPlaying){
             marioMode = (marioMode != JUMP) ? RUN : RUMP;
-            //runMario();
             marioDir = getMoveDir(marioMode);
-            collisionCheck((marioDir));
+            moveHandler((marioDir));
         }
         // Jump
         else if(uartin[0] == ' ' && isPlaying && jumpProg == -1){
             //Activate jump sequence
             HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_0);
             jumpProg = 0;
-            //marioMode = JUMP;
-            marioMode = (marioMode != RUN) ? JUMP : RUMP;
+            marioMode = JUMP;
             HAL_TIM_Base_Start_IT(&htim3);
         }
         // Play/Resume/Start
@@ -1098,14 +1118,21 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             }
             else {
                 setCursor(5, 1);
-                print ("           ");isPlaying = 1;
-                HAL_TIM_Base_Start_IT(&htim4);
+                print ("           ");
+                isPlaying = 1;
+                // endTime was set at pause
+                // -> the extra duration counted.
+                // we can shift the start time
+                // and concat it to current time.
+                startTime = HAL_GetTick() - (endTime - startTime);
                 HAL_TIM_Base_Start_IT(&htim2);
             }
         }
         // Pause/Stop
         else if(uartin[0] == 'p' || uartin[0] == 'P' && isPlaying){
             isPlaying = 0;
+            // don't count the time paused
+            endTime = HAL_GetTick();
             setCursor(5, 1);
             print("P A U S E D");
             unsigned char data[40];
@@ -1113,7 +1140,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             HAL_UART_Transmit(&huart1, data, sizestr, 1000);
             HAL_TIM_Base_Stop_IT(&htim2);
             HAL_TIM_Base_Stop_IT(&htim3);
-            HAL_TIM_Base_Stop_IT(&htim4);
         }
         HAL_UART_Receive_IT(&huart1, uartin, sizeof(uartin));
     }
@@ -1122,16 +1148,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 // print map (htim2) and print jump (htim3)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
     // first check for speed changes, then print
-    // TODO: which to print first? Mario/Map
 	if (htim->Instance == TIM2){
 	    // check if speed has changed
 	    HAL_ADC_Start_IT(&hadc4);
-        if(isPlaying) {
+        if(isPlaying
+        && marioMode != JUMP
+        && marioMode != RUMP) {
             marioDir = getMoveDir(marioMode);
-            collisionCheck(marioDir);
+            moveHandler(marioDir);
         }
         // if mario is jumping, don't change offset
-        if (marioMode != JUMP && marioMode != RUMP)
+        if (marioMode != JUMP && marioMode != RUMP && marioMode != RUN)
 	        printMap();
 
         // lose immunity from start/life lost
@@ -1143,6 +1170,40 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	if (htim->Instance == TIM3){
         // do the jump routine
         jump();
+	}
+	if (htim->Instance == TIM4){
+	    // write digit to 7seg
+        HAL_GPIO_WritePin (GPIOA, ssd[3-d+1], 0);
+        if (d == 4) {
+            d = 0;
+            val = coins;
+        }
+        if (d == 0) {
+            int r = val % 10;
+            numToBcd(r);
+            val = val / 10;
+        }
+        else if(d == 1){
+            int r = val % 10;
+            numToBcd(r);
+            val = val / 10;
+            HAL_GPIO_WritePin(GPIOF, GPIO_PIN_2, 1);
+        }
+        else if(d == 2){
+            val = (int) volSpeed * 10;
+            int r = val % 10;
+            numToBcd(r);
+            val = val / 10;
+            // dec point
+            HAL_GPIO_WritePin(GPIOF, GPIO_PIN_2, 0);
+        }
+        else if (d == 3){
+            int r = val % 10;
+            numToBcd(r);
+            val = coins;
+        }
+        HAL_GPIO_WritePin (GPIOA, outa[3-d], 1);
+        d++;
 	}
 }
 
@@ -1185,14 +1246,6 @@ enum moveDir getMoveDir(enum moveType move){
             }
             break;
         case RUMP:
-            if (jumpProg != -1 && jumpProg < 2){
-                return UPRIGHT;
-            }
-            else if (jumpProg != -1){
-                return DOWNRIGHT;
-            }
-            return RIGHT;
-            break;
         case RUN:
             return RIGHT;
         case HALT:
@@ -1202,8 +1255,8 @@ enum moveDir getMoveDir(enum moveType move){
     return NONE;
 }
 
-// collision detection and handling
-void collisionCheck(enum moveDir dir) {
+// collision detection and movement handling
+void moveHandler(enum moveDir dir) {
     int oldy = mario[0];
     int oldx = mario[1];
 
@@ -1227,14 +1280,15 @@ void collisionCheck(enum moveDir dir) {
                 mapOffset += 3;
             }
             // path is clear
-            if (map[oldy][oldx + 1] == AIR){
+            if (map[oldy][oldx + 1] == AIR
+            || map[oldy][oldx + 1] == FLAG){
                 // reset old cell to original state
                 map[oldy][oldx] = genmap[oldy][oldx];
                 map[oldy][oldx+1] = MARIO;
                 mario[1] = oldx + 1;
             }
             // fall back to ground if no pipe
-            if (oldy == 1 && map[2][oldx] != PIPE && jumpProg > 1){
+            if (oldy == 1 && map[2][oldx+1] != PIPE && jumpProg > 1){
                 map[1][oldx] = genmap[1][oldx];
                 map[2][oldx] = MARIO;
                 mario[0] = 2;
@@ -1242,13 +1296,17 @@ void collisionCheck(enum moveDir dir) {
                 write(cellTypeChar[map[1][oldx]]);
                 setCursor(mario[1] - mapOffset + 2, mario[0]);
                 write(cellTypeChar[MARIO]);
+                break;
             }
-            //TODO: check for pits, here??
+            setCursor(oldx - mapOffset + 2, oldy);
+            write(cellTypeChar[map[oldy][oldx]]);
+            if(mario[0] != oldy)
+                setCursor(mario[1] - mapOffset + 2, mario[0]);
+            write(cellTypeChar[MARIO]);
             break;
         case UP:
             // mario can *still* go up
             if (mario[0] > 0){
-                // TODO: check ordering of conditions
                 // space to move / no collision
                 if (map[oldy-1][oldx] == AIR ){
                     // reset old cell to original state
@@ -1261,7 +1319,6 @@ void collisionCheck(enum moveDir dir) {
                     // break the chest
                     map[0][oldx] = AIR;
                     genmap[0][oldx] = AIR;
-                    //map[oldy-1][oldx] = MARIO;
                     // add coins to mario
                     // (random amount between 1-3)
                     int c = rand() % 3 + 1;
@@ -1277,7 +1334,8 @@ void collisionCheck(enum moveDir dir) {
             }
             setCursor(oldx - mapOffset + 2, oldy);
             write(cellTypeChar[map[oldy][oldx]]);
-            setCursor(mario[1] - mapOffset + 2, mario[0]);
+            if (mario[0] != oldy)
+                setCursor(mario[1] - mapOffset + 2, mario[0]);
             write(cellTypeChar[MARIO]);
             break;
         case DOWN:
@@ -1290,7 +1348,8 @@ void collisionCheck(enum moveDir dir) {
             }
             setCursor(oldx - mapOffset + 2, oldy);
             write(cellTypeChar[map[oldy][oldx]]);
-            setCursor(mario[1] - mapOffset + 2, mario[0]);
+            if (mario[0] != oldy)
+                setCursor(mario[1] - mapOffset + 2, mario[0]);
             write(cellTypeChar[MARIO]);
             break;
         case NONE:
@@ -1322,105 +1381,27 @@ void collisionCheck(enum moveDir dir) {
         mario[1] += 1;
         return;
     }
-
-    ////walk on pipes
-    //if (map[2][x] == PIPE && oldy == 0
-    //&& (dir == RIGHT || dir == DOWN || dir == NONE)){
-    //    mario[0] = 1;
-    //    //newy = 1;
-    //    printMario(newy, newx, 0);
-    //    return;
-    //}
-
-    //// down to earth
-    //if (map[2][x] == AIR && oldy == 1
-    //&& (dir != UP)){
-    //    //mario[0] = 2;
-    //    newy = 2;
-    //    printMario(newy, newx, 0);
-    //    return;
-    //}
-    marioMode = (marioMode == RUMP || marioMode == JUMP)? JUMP : HALT;
+    // stop mario if he was moving (walk is only one sequence)
+    marioMode = ((marioMode == RUMP || marioMode == JUMP) && jumpProg != -1)? JUMP : HALT;
 }
 
-// walk sequence handler + block/pipe handler while walking
-void runMario (){
-    // don't move if there's a block or pipe
-    if((mario[0] == 2 && map[2][mario[1]+1] == PIPE)
-       || (mario[0] == 0 && map[0][mario[1]+1] == BLOCK)
-       || (mario[0] == 0 && map[0][mario[1]+1] == CHEST)) {
-        unsigned char data[40];
-        int size = sprintf(data, "BLOCK? PIPE?\n");
-        HAL_UART_Transmit(&huart1, data, size,1000);
-        return;
-    }
-
-    // falling is only possible when not jumping
-    if ((mario[0] == 2 && map[3][mario[1]+1] == AIR)
-        && marioMode == RUN){
-        unsigned char data[40];
-        int sizestr = sprintf(data, "That was a steep fall :( \n");
-        HAL_UART_Transmit(&huart1, data, sizestr, 1000);
-        HAL_GPIO_WritePin(GPIOE, leds[6], 1);
-        lifeLost();
-        int x = mario[1];
-        mario[1]  += 2;
-        return;
-    }
-
-    int x = mario[1];
-    HAL_TIM_Base_Stop_IT(&htim2);
-    // if got close to map edge, scroll
-    if (x >= mapOffset + 19){
-        mapOffset += 3;
-        //TODO: CHECK THIS
-        printMap();
-    }
-
-    x++;
-    mario[1] = x;
-    HAL_TIM_Base_Start_IT(&htim2);
-    // if RUMP, switch back to JUMP mode
-    marioMode = (marioMode == RUN) ? HALT : JUMP;
-}
 
 // jump sequence handler
-void jump (){
-    switch (jumpProg){
-        case 3:
-            marioDir = getMoveDir(marioMode);
-            collisionCheck((marioDir));
-            marioMode = HALT;
-            jumpProg = -1;
-            // relay pass
-            HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_0);
-            HAL_TIM_Base_Stop_IT(&htim3);
-            break;
-        case 1:
-        case 0:
-            marioDir = getMoveDir(marioMode);
-            collisionCheck((marioDir));
-            break;
-        case 2:
-        default:
-            // coins $_$
-            //if (map[0][mario[1]] == CHEST) {
-            //    // break the chest
-            //    map[0][oldx] = AIR;
-            //    charMap[0][oldx] = cellTypeChar[AIR];
-            //    // add coins to mario (random between 1-3)
-            //    int c = rand() % 3 + 1;
-            //    char data[45] = "";
-            //    coins += c;
-            //    int sizestr = sprintf(data, "You found %d coins $_$\t"
-            //                                "Total coins: %d\n", c, coins);
-            //    HAL_UART_Transmit(&huart1, data, sizestr, 1000);
-            //}
-            marioDir = getMoveDir(marioMode);
-            collisionCheck((marioDir));
-            break;
-    }
+void jump () {
 
+    if (jumpProg == 3) {
+        marioDir = getMoveDir(marioMode);
+        moveHandler((marioDir));
+        marioMode = HALT;
+        jumpProg = -1;
+        // relay pass
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_0);
+        HAL_TIM_Base_Stop_IT(&htim3);
+    }
+    else {
+        marioDir = getMoveDir(marioMode);
+        moveHandler((marioDir));
+    }
     if (marioMode == RUMP)
         marioMode = (jumpProg == -1)? HALT : JUMP;
     if (jumpProg != -1)
@@ -1475,10 +1456,18 @@ void lifeLost (){
     }
 }
 
+int getScore(int duration, int won){
+    int score = 1e6/duration;
+    score = coins * ((won)? score : 1);
+    return score;
+}
+
 // game lost handler, can restart
 void gameLost (){
     HAL_TIM_Base_Stop_IT(&htim2);
+    endTime = HAL_GetTick();
     command(LCD_CLEARDISPLAY);
+    int score = getScore(endTime - startTime, 0);
 
     //print pretty stuff and stats (to uart & lcd)
     unsigned char data[40] = "";
@@ -1487,17 +1476,19 @@ void gameLost (){
     HAL_UART_Transmit(&huart1, data, sizestr, 1000);
     sizestr = sprintf(data, "$$  Coins: %d  $$\n", coins);
     HAL_UART_Transmit(&huart1, data, sizestr, 1000);
+    sizestr = sprintf(data, "**** Score: %d ****\n", score);
+    HAL_UART_Transmit(&huart1, data, sizestr, 1000);
     // turn on all leds
     HAL_GPIO_WritePin(GPIOE, 0xFFF00U, 1);
     setCursor(1,0);
 
-    for (int i=0; i<5; i++) {
+    for (int i=0; i<4; i++) {
         write(cellTypeChar[BLOCK]);
     }
-    sprintf(data, "   %2d   ", coins);
+    sprintf(data, "   %4d   ", score);
     print(data);
 
-    for (int i=0; i<5; i++) {
+    for (int i=0; i<4; i++) {
         write(cellTypeChar[BLOCK]);
     }
 
@@ -1522,25 +1513,29 @@ void gameLost (){
 // game won handler
 void gameWon (){
     HAL_TIM_Base_Stop_IT(&htim2);
+    endTime = HAL_GetTick();
     command(LCD_CLEARDISPLAY);
-
+    int score = getScore(endTime - startTime, 1);
+    // print pretty stuff & stat to lcd/uart
     unsigned char data[40] = "";
     int sizestr;
     sizestr = sprintf(data, "\nYou Won\n");
     HAL_UART_Transmit(&huart1, data, sizestr, 1000);
     sizestr = sprintf(data, "$$   Coins: %d   $$\n", coins);
     HAL_UART_Transmit(&huart1, data, sizestr, 1000);
+    sizestr = sprintf(data, "**** Score: %d ****\n", score);
+    HAL_UART_Transmit(&huart1, data, sizestr, 1000);
     // turn on all leds
     HAL_GPIO_WritePin(GPIOE, 0xFFF00U, 1);
     setCursor(1,0);
 
-    for (int i=0; i<5; i++) {
+    for (int i=0; i<3; i++) {
         write(cellTypeChar[BLOCK]);
     }
-    sprintf(data, "   %2d   ", coins);
+    sprintf(data, "   %4d   ", score);
     print(data);
 
-    for (int i=0; i<5; i++) {
+    for (int i=0; i<3; i++) {
         write(cellTypeChar[BLOCK]);
     }
 
